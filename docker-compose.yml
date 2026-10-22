@@ -1,9 +1,7 @@
 version: '3.8'
 
 services:
-  # ----------------------------------------------------------------------------
   # PostgreSQL 16 - Relational Database for Tickets, Users, Messages
-  # ----------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
     container_name: helpdesk_postgres
@@ -22,9 +20,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # ----------------------------------------------------------------------------
   # Redis 7 - In-memory Store for BullMQ Queues, Sessions & Pub/Sub
-  # ----------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: helpdesk_redis
