@@ -14,6 +14,7 @@ import {
   AuditLog,
 } from './database/entities/index.js';
 import { HealthModule } from './modules/health/health.module.js';
+import { TicketsModule } from './modules/tickets/tickets.module.js';
 
 @Module({
   imports: [
@@ -50,6 +51,8 @@ import { HealthModule } from './modules/health/health.module.js';
     }),
 
     HealthModule,
+    TicketsModule,
   ],
 })
 export class AppModule { }
+
