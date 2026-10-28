@@ -4,6 +4,9 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import configuration from './config/configuration.js';
 import { ScheduleModule } from '@nestjs/schedule';
 import { EmailModule } from './modules/email/email.module.js';
+import { TicketsModule } from './modules/tickets/tickets.module.js';
+import { WebformModule } from './modules/webform/webform.module.js';
+import { EmailProcessedMessage } from './modules/email/email-processed.entity.js';
 import {
   Role,
   User,
@@ -45,6 +48,7 @@ import { HealthModule } from './modules/health/health.module.js';
           TicketMessage,
           TicketStatusHistory,
           AuditLog,
+          EmailProcessedMessage,
         ],
         synchronize: configService.get<boolean>('database.synchronize', true),
         logging: configService.get<boolean>('database.logging', false),
@@ -54,6 +58,8 @@ import { HealthModule } from './modules/health/health.module.js';
     HealthModule,
     ScheduleModule.forRoot(),
     EmailModule,
+    TicketsModule,
+    WebformModule,
   ],
 })
 export class AppModule { }

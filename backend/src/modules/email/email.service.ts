@@ -8,6 +8,10 @@ import * as nodemailer from 'nodemailer';
 import { readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { NormalizedEmail } from './normalized-email.interface.js';
+import { TicketsService } from '../tickets/tickets.service.js';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, DataSource } from 'typeorm';
+import { EmailProcessedMessage } from './email-processed.entity.js';
 interface EmailSyncState {
   uidValidity: string | null;
   lastProcessedUid: number | null;
@@ -16,6 +20,10 @@ interface EmailSyncState {
 export class EmailService {
   constructor(
     private readonly configService: ConfigService,
+    private readonly ticketsService: TicketsService,
+    @InjectRepository(EmailProcessedMessage)
+    private readonly processedEmailRepo: Repository<EmailProcessedMessage>,
+    private readonly dataSource: DataSource,
   ) {}
 
   // Hàm 1: Lấy cấu hình IMAP từ file .env
@@ -191,10 +199,109 @@ export class EmailService {
       channel: 'EMAIL',
     };
   }
+  
+async createTicketFromEmail(email: NormalizedEmail) {
+  const subject =
+    email.subject.trim().length >= 5
+      ? email.subject.trim()
+      : `Email: ${email.subject.trim() || 'Không có tiêu đề'}`;
+
+  const description =
+    email.content.trim().length >= 10
+      ? email.content.trim()
+      : email.content.trim() ||
+        'Khách hàng gửi email không có nội dung.';
+
+  return this.ticketsService.createFromWebForm({
+    customer_name:
+      email.fromEmail.split('@')[0] || 'Email Customer',
+    customer_email: email.fromEmail,
+    subject,
+    description,
+    channel_type: 'email',
+    priority: 'medium',
+  });
+}
+
 
   // Tự động kiểm tra Gmail mỗi 1 phút
   private isCheckingEmail = false;
   
+ 
+private async processEmailWithTransaction(
+  email: NormalizedEmail,
+  uidValidity: string,
+): Promise<void> {
+  const mailbox = this.configService
+    .getOrThrow<string>('EMAIL_USER')
+    .trim()
+    .toLowerCase();
+
+  await this.dataSource.transaction(async (manager) => {
+    const processedRepo = manager.getRepository(EmailProcessedMessage);
+
+    // Khóa duy nhất ngăn đăng ký trùng một email.
+    const inserted = await processedRepo
+      .createQueryBuilder()
+      .insert()
+      .values({
+        mailbox,
+        uidValidity,
+        imapUid: email.imapUid,
+        messageId: email.messageId,
+        ticketId: null,
+        status: 'processing',
+      })
+      .orIgnore()
+      .returning(['id'])
+      .execute();
+
+    // Email đã được xử lý trong một transaction trước đó.
+    if (inserted.raw.length === 0) {
+      console.log('[EMAIL SKIPPED - DUPLICATE]', {
+        imapUid: email.imapUid,
+      });
+      return;
+    }
+
+    // Tạo Ticket bằng cùng EntityManager.
+    const ticket = await this.ticketsService.createFromWebForm(
+      {
+        customer_name:
+          email.fromEmail.split('@')[0] || 'Email Customer',
+        customer_email: email.fromEmail,
+        subject:
+          email.subject.trim().length >= 5
+            ? email.subject.trim()
+            : `Email: ${email.subject.trim() || 'Không có tiêu đề'}`,
+        description:
+          email.content.trim().length >= 10
+            ? email.content.trim()
+            : email.content.trim() ||
+              'Khách hàng gửi email không có nội dung.',
+        channel_type: 'email',
+        priority: 'medium',
+      },
+      manager,
+    );
+
+    // Đánh dấu hoàn tất trong cùng transaction.
+    await processedRepo.update(
+      { id: inserted.identifiers[0].id as string },
+      {
+        ticketId: ticket.ticket_id,
+        status: 'completed',
+      },
+    );
+
+    console.log('[EMAIL TICKET CREATED]', {
+      imapUid: email.imapUid,
+      ticketId: ticket.ticket_id,
+      ticketCode: ticket.ticket_code,
+    });
+  });
+}
+
 
   
   
@@ -257,25 +364,35 @@ export class EmailService {
       );
 
       // Xử lý lần lượt từng email
+     
+      // Xử lý lần lượt từng email
       for (const uid of newUids) {
         const email = await this.normalizeEmail(uid);
 
         console.log('[EMAIL NORMALIZED]', {
-            imapUid: email.imapUid,
-            messageIdPresent: email.messageId !== null,
-            subjectPresent: email.subject.length > 0,
-            fromEmailPresent: email.fromEmail.length > 0,
-            contentLength: email.content.length,
-            receivedAt: email.receivedAt,
-            channel: email.channel,
-     });
+          imapUid: email.imapUid,
+          messageIdPresent: email.messageId !== null,
+          subjectPresent: email.subject.length > 0,
+          fromEmailPresent: email.fromEmail.length > 0,
+          contentLength: email.content.length,
+          receivedAt: email.receivedAt,
+          channel: email.channel,
+        });
 
-        // Chỉ cập nhật UID sau khi đọc email thành công
+        // Tạo Ticket từ email đã chuẩn hóa
+        // Tạo Ticket và ghi nhận email trong cùng transaction
+       await this.processEmailWithTransaction(
+        email,
+        state.uidValidity,
+       );
+
+        // Chỉ lưu UID sau khi tạo Ticket thành công
         await this.saveEmailSyncState({
           uidValidity: state.uidValidity,
           lastProcessedUid: uid,
         });
       }
+
     } catch (error) {
       console.error(
         '[EMAIL AUTO CHECK] Lỗi đồng bộ:',
@@ -330,6 +447,7 @@ export class EmailService {
     to: string,
     subject: string,
     text: string,
+    html?: string,
   ): Promise<string> {
     const host = this.configService.get<string>('EMAIL_SMTP_HOST');
     const port = Number(
@@ -376,6 +494,7 @@ export class EmailService {
       to,
       subject,
       text,
+      html,
     });
 
     return info.messageId;
