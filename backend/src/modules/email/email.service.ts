@@ -9,6 +9,9 @@ import { readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { NormalizedEmail } from './normalized-email.interface.js';
 import { TicketsService } from '../tickets/tickets.service.js';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { EmailProcessedMessage } from './email-processed.entity.js';
 interface EmailSyncState {
   uidValidity: string | null;
   lastProcessedUid: number | null;
@@ -18,6 +21,8 @@ export class EmailService {
   constructor(
     private readonly configService: ConfigService,
     private readonly ticketsService: TicketsService,
+    @InjectRepository(EmailProcessedMessage)
+    private readonly processedEmailRepo: Repository<EmailProcessedMessage>,
   ) {}
 
   // Hàm 1: Lấy cấu hình IMAP từ file .env
@@ -221,6 +226,33 @@ async createTicketFromEmail(email: NormalizedEmail) {
   // Tự động kiểm tra Gmail mỗi 1 phút
   private isCheckingEmail = false;
   
+  private async reserveEmail(
+  email: NormalizedEmail,
+  uidValidity: string,
+  ): Promise<boolean> {
+  const mailbox = this.configService
+    .getOrThrow<string>('EMAIL_USER')
+    .trim()
+    .toLowerCase();
+
+  const result = await this.processedEmailRepo
+    .createQueryBuilder()
+    .insert()
+    .into(EmailProcessedMessage)
+    .values({
+      mailbox,
+      uidValidity,
+      imapUid: email.imapUid,
+      messageId: email.messageId,
+      ticketId: null,
+      status: 'processing',
+    })
+    .orIgnore()
+    .returning(['id'])
+    .execute();
+
+  return result.raw.length > 0;
+}
 
   
   
