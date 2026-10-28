@@ -8,6 +8,7 @@ import * as nodemailer from 'nodemailer';
 import { readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { NormalizedEmail } from './normalized-email.interface.js';
+import { TicketsService } from '../tickets/tickets.service.js';
 interface EmailSyncState {
   uidValidity: string | null;
   lastProcessedUid: number | null;
@@ -16,6 +17,7 @@ interface EmailSyncState {
 export class EmailService {
   constructor(
     private readonly configService: ConfigService,
+    private readonly ticketsService: TicketsService,
   ) {}
 
   // Hàm 1: Lấy cấu hình IMAP từ file .env
@@ -191,6 +193,30 @@ export class EmailService {
       channel: 'EMAIL',
     };
   }
+  
+async createTicketFromEmail(email: NormalizedEmail) {
+  const subject =
+    email.subject.trim().length >= 5
+      ? email.subject.trim()
+      : `Email: ${email.subject.trim() || 'Không có tiêu đề'}`;
+
+  const description =
+    email.content.trim().length >= 10
+      ? email.content.trim()
+      : email.content.trim() ||
+        'Khách hàng gửi email không có nội dung.';
+
+  return this.ticketsService.createFromWebForm({
+    customer_name:
+      email.fromEmail.split('@')[0] || 'Email Customer',
+    customer_email: email.fromEmail,
+    subject,
+    description,
+    channel_type: 'email',
+    priority: 'medium',
+  });
+}
+
 
   // Tự động kiểm tra Gmail mỗi 1 phút
   private isCheckingEmail = false;
@@ -257,25 +283,37 @@ export class EmailService {
       );
 
       // Xử lý lần lượt từng email
+     
+      // Xử lý lần lượt từng email
       for (const uid of newUids) {
         const email = await this.normalizeEmail(uid);
 
         console.log('[EMAIL NORMALIZED]', {
-            imapUid: email.imapUid,
-            messageIdPresent: email.messageId !== null,
-            subjectPresent: email.subject.length > 0,
-            fromEmailPresent: email.fromEmail.length > 0,
-            contentLength: email.content.length,
-            receivedAt: email.receivedAt,
-            channel: email.channel,
-     });
+          imapUid: email.imapUid,
+          messageIdPresent: email.messageId !== null,
+          subjectPresent: email.subject.length > 0,
+          fromEmailPresent: email.fromEmail.length > 0,
+          contentLength: email.content.length,
+          receivedAt: email.receivedAt,
+          channel: email.channel,
+        });
 
-        // Chỉ cập nhật UID sau khi đọc email thành công
+        // Tạo Ticket từ email đã chuẩn hóa
+        const ticket = await this.createTicketFromEmail(email);
+
+        console.log('[EMAIL TICKET CREATED]', {
+          imapUid: uid,
+          ticketId: ticket.ticket_id,
+          ticketCode: ticket.ticket_code,
+        });
+
+        // Chỉ lưu UID sau khi tạo Ticket thành công
         await this.saveEmailSyncState({
           uidValidity: state.uidValidity,
           lastProcessedUid: uid,
         });
       }
+
     } catch (error) {
       console.error(
         '[EMAIL AUTO CHECK] Lỗi đồng bộ:',
