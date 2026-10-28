@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import type { NormalizedEmail } from './normalized-email.interface.js';
 import { TicketsService } from '../tickets/tickets.service.js';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, DataSource } from 'typeorm';
 import { EmailProcessedMessage } from './email-processed.entity.js';
 interface EmailSyncState {
   uidValidity: string | null;
@@ -23,6 +23,7 @@ export class EmailService {
     private readonly ticketsService: TicketsService,
     @InjectRepository(EmailProcessedMessage)
     private readonly processedEmailRepo: Repository<EmailProcessedMessage>,
+    private readonly dataSource: DataSource,
   ) {}
 
   // Hàm 1: Lấy cấu hình IMAP từ file .env
@@ -226,33 +227,81 @@ async createTicketFromEmail(email: NormalizedEmail) {
   // Tự động kiểm tra Gmail mỗi 1 phút
   private isCheckingEmail = false;
   
-  private async reserveEmail(
+ 
+private async processEmailWithTransaction(
   email: NormalizedEmail,
   uidValidity: string,
-  ): Promise<boolean> {
+): Promise<void> {
   const mailbox = this.configService
     .getOrThrow<string>('EMAIL_USER')
     .trim()
     .toLowerCase();
 
-  const result = await this.processedEmailRepo
-    .createQueryBuilder()
-    .insert()
-    .into(EmailProcessedMessage)
-    .values({
-      mailbox,
-      uidValidity,
-      imapUid: email.imapUid,
-      messageId: email.messageId,
-      ticketId: null,
-      status: 'processing',
-    })
-    .orIgnore()
-    .returning(['id'])
-    .execute();
+  await this.dataSource.transaction(async (manager) => {
+    const processedRepo = manager.getRepository(EmailProcessedMessage);
 
-  return result.raw.length > 0;
+    // Khóa duy nhất ngăn đăng ký trùng một email.
+    const inserted = await processedRepo
+      .createQueryBuilder()
+      .insert()
+      .values({
+        mailbox,
+        uidValidity,
+        imapUid: email.imapUid,
+        messageId: email.messageId,
+        ticketId: null,
+        status: 'processing',
+      })
+      .orIgnore()
+      .returning(['id'])
+      .execute();
+
+    // Email đã được xử lý trong một transaction trước đó.
+    if (inserted.raw.length === 0) {
+      console.log('[EMAIL SKIPPED - DUPLICATE]', {
+        imapUid: email.imapUid,
+      });
+      return;
+    }
+
+    // Tạo Ticket bằng cùng EntityManager.
+    const ticket = await this.ticketsService.createFromWebForm(
+      {
+        customer_name:
+          email.fromEmail.split('@')[0] || 'Email Customer',
+        customer_email: email.fromEmail,
+        subject:
+          email.subject.trim().length >= 5
+            ? email.subject.trim()
+            : `Email: ${email.subject.trim() || 'Không có tiêu đề'}`,
+        description:
+          email.content.trim().length >= 10
+            ? email.content.trim()
+            : email.content.trim() ||
+              'Khách hàng gửi email không có nội dung.',
+        channel_type: 'email',
+        priority: 'medium',
+      },
+      manager,
+    );
+
+    // Đánh dấu hoàn tất trong cùng transaction.
+    await processedRepo.update(
+      { id: inserted.identifiers[0].id as string },
+      {
+        ticketId: ticket.ticket_id,
+        status: 'completed',
+      },
+    );
+
+    console.log('[EMAIL TICKET CREATED]', {
+      imapUid: email.imapUid,
+      ticketId: ticket.ticket_id,
+      ticketCode: ticket.ticket_code,
+    });
+  });
 }
+
 
   
   
@@ -331,13 +380,11 @@ async createTicketFromEmail(email: NormalizedEmail) {
         });
 
         // Tạo Ticket từ email đã chuẩn hóa
-        const ticket = await this.createTicketFromEmail(email);
-
-        console.log('[EMAIL TICKET CREATED]', {
-          imapUid: uid,
-          ticketId: ticket.ticket_id,
-          ticketCode: ticket.ticket_code,
-        });
+        // Tạo Ticket và ghi nhận email trong cùng transaction
+       await this.processEmailWithTransaction(
+        email,
+        state.uidValidity,
+       );
 
         // Chỉ lưu UID sau khi tạo Ticket thành công
         await this.saveEmailSyncState({
