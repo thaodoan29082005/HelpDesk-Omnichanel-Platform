@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import configuration from './config/configuration.js';
+import { ScheduleModule } from '@nestjs/schedule';
+import { EmailModule } from './modules/email/email.module.js';
 import {
   Role,
   User,
@@ -50,6 +52,8 @@ import { HealthModule } from './modules/health/health.module.js';
     }),
 
     HealthModule,
+    ScheduleModule.forRoot(),
+    EmailModule,
   ],
 })
 export class AppModule { }
