@@ -330,6 +330,7 @@ export class EmailService {
     to: string,
     subject: string,
     text: string,
+    html?: string,
   ): Promise<string> {
     const host = this.configService.get<string>('EMAIL_SMTP_HOST');
     const port = Number(
@@ -376,6 +377,7 @@ export class EmailService {
       to,
       subject,
       text,
+      html,
     });
 
     return info.messageId;

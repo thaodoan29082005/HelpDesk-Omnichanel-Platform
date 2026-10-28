@@ -1,5 +1,5 @@
 export const WEBFORM_CONFIG = {
-  channelType: 'WEB_FORM',
+  channelType: 'web',
   channelName: 'Web Form',
   confirmationEmail: {
     enabled: true,
