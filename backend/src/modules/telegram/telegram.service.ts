@@ -39,22 +39,15 @@ export class TelegramService {
       return;
     }
 
-    const senderName = [
-      message.from?.first_name,
-      message.from?.last_name,
-    ]
-      .filter(Boolean)
-      .join(' ') || 'Telegram Customer';
+    
 
     this.logger.log(
       `Telegram update_id=${update.update_id}, ` +
       `message_id=${message.message_id}, ` +
-      `chat_id=${message.chat.id}, ` +
-      `from=${senderName}, ` +
-      `text=${message.text}`,
+      `chat_id=${message.chat.id}`,
     );
     await this.createTicketFromTelegram(update);
-    // Task 3.2 sẽ tạo Ticket tại đây.
+    
   }
   
 private async createTicketFromTelegram(

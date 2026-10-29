@@ -33,10 +33,10 @@ export class TelegramController {
         'Telegram webhook secret không hợp lệ',
       );
     }
-    await this.telegramService.handleUpdate(
+    await this.telegramService.handleUpdate( // 
       update as Parameters<TelegramService['handleUpdate']>[0],
     );
-    // Bước tiếp theo sẽ chuyển update sang TelegramService.
+    
     return { ok: true };
   }
 }
