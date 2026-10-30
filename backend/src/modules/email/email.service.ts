@@ -5,7 +5,7 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import * as nodemailer from 'nodemailer';
-import { readFile, writeFile, rename, rm } from 'node:fs/promises';
+import { readFile, writeFile, rename, rm, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { NormalizedEmail } from './normalized-email.interface.js';
 import { TicketsService } from '../tickets/tickets.service.js';
@@ -305,10 +305,17 @@ private async processEmailWithTransaction(
 
   
   
-  //@Cron(CronExpression.EVERY_MINUTE)
+  @Cron(CronExpression.EVERY_MINUTE)
   async checkNewEmailsAutomatically(): Promise<void> {
     // Tránh chạy chồng hai lần kiểm tra
     if (this.isCheckingEmail) {
+      return;
+    }
+
+    // Nếu chưa cấu hình email trong môi trường thì bỏ qua
+    const host = this.configService.get<string>('EMAIL_IMAP_HOST');
+    const user = this.configService.get<string>('EMAIL_USER');
+    if (!host || !user || user.includes('example.com') || user.includes('your_helpdesk')) {
       return;
     }
 
@@ -458,7 +465,9 @@ private async processEmailWithTransaction(
 
     const user = this.configService.get<string>('EMAIL_USER');
     const pass = this.configService.get<string>('EMAIL_PASSWORD');
-    const from = this.configService.get<string>('EMAIL_FROM');
+    const fromName = this.configService.get<string>('EMAIL_FROM_NAME');
+    const rawFrom = this.configService.get<string>('EMAIL_FROM') || user;
+    const from = fromName && rawFrom ? `"${fromName}" <${rawFrom}>` : rawFrom;
 
     // Kiểm tra cấu hình SMTP
     if (
@@ -502,64 +511,98 @@ private async processEmailWithTransaction(
   
   // Đọc trạng thái đồng bộ email từ file JSON
   private async loadEmailSyncState(): Promise<EmailSyncState> {
-    const filePath = join(
+    const dirPath = join(
       process.cwd(),
       'data',
+    );
+    const filePath = join(
+      dirPath,
       'email-sync-state.json',
     );
 
-    const fileContent = await readFile(filePath, 'utf8');
+    try {
+      const fileContent = await readFile(filePath, 'utf8');
 
-    const state: unknown = JSON.parse(fileContent);
+      const state: unknown = JSON.parse(fileContent);
 
-    // Kiểm tra cấu trúc dữ liệu trước khi sử dụng
-    if (
-      typeof state !== 'object' ||
-      state === null ||
-      !('uidValidity' in state) ||
-      !('lastProcessedUid' in state)
-    ) {
-      throw new Error('File trạng thái email không hợp lệ');
-    }
+      // Kiểm tra cấu trúc dữ liệu trước khi sử dụng
+      if (
+        typeof state !== 'object' ||
+        state === null ||
+        !('uidValidity' in state) ||
+        !('lastProcessedUid' in state)
+      ) {
+        throw new Error('File trạng thái email không hợp lệ');
+      }
 
-    const { uidValidity, lastProcessedUid } = state;
+      const { uidValidity, lastProcessedUid } = state;
 
-    if (
-      !(
-        uidValidity === null ||
-        typeof uidValidity === 'string'
-      ) ||
-      !(
-        lastProcessedUid === null ||
-        (
-          typeof lastProcessedUid === 'number' &&
-          Number.isSafeInteger(lastProcessedUid) &&
-          lastProcessedUid >= 0
+      if (
+        !(
+          uidValidity === null ||
+          typeof uidValidity === 'string'
+        ) ||
+        !(
+          lastProcessedUid === null ||
+          (
+            typeof lastProcessedUid === 'number' &&
+            Number.isSafeInteger(lastProcessedUid) &&
+            lastProcessedUid >= 0
+          )
         )
-      )
-    ) {
-      throw new Error('Dữ liệu trạng thái email không hợp lệ');
-    }
+      ) {
+        throw new Error('Dữ liệu trạng thái email không hợp lệ');
+      }
 
-    return {
-      uidValidity,
-      lastProcessedUid,
-    };
+      return {
+        uidValidity,
+        lastProcessedUid,
+      };
+    } catch (error: unknown) {
+      const isEnoent =
+        error instanceof Error &&
+        'code' in error &&
+        (error as { code: string }).code === 'ENOENT';
+
+      if (isEnoent) {
+        const defaultState: EmailSyncState = {
+          uidValidity: null,
+          lastProcessedUid: null,
+        };
+
+        // Tự động tạo thư mục data và file trạng thái ban đầu khi project mới clone
+        await mkdir(dirPath, { recursive: true });
+        await writeFile(
+          filePath,
+          JSON.stringify(defaultState, null, 2),
+          'utf8',
+        );
+
+        return defaultState;
+      }
+
+      throw error;
+    }
   }
   
   // Lưu trạng thái đồng bộ IMAP vào file JSON
   private async saveEmailSyncState(
     state: EmailSyncState,
   ): Promise<void> {
-    const filePath = join(
+    const dirPath = join(
       process.cwd(),
       'data',
+    );
+    const filePath = join(
+      dirPath,
       'email-sync-state.json',
     );
 
     const tempPath = `${filePath}.tmp`;
 
     const content = JSON.stringify(state, null, 2);
+
+    await mkdir(dirPath, { recursive: true });
 
     try {
       // Ghi trạng thái mới vào file tạm
