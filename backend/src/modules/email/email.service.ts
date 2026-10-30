@@ -15,6 +15,7 @@ import { EmailProcessedMessage } from './email-processed.entity.js';
 interface EmailSyncState {
   uidValidity: string | null;
   lastProcessedUid: number | null;
+  failedUids: number[];
 }
 @Injectable()
 export class EmailService {
@@ -28,13 +29,11 @@ export class EmailService {
 
   // Hàm 1: Lấy cấu hình IMAP từ file .env
   getImapConfig() {
+    const port = Number(this.configService.get<string>('EMAIL_IMAP_PORT'));
     return {
       host: this.configService.get<string>('EMAIL_IMAP_HOST'),
-      port: Number(
-        this.configService.get<string>('EMAIL_IMAP_PORT'),
-      ),
-      secure:
-        this.configService.get<string>('EMAIL_IMAP_SECURE') === 'true',
+      port,
+      secure: this.getImapSecure(port),
       user: this.configService.get<string>('EMAIL_USER'),
     };
   }
@@ -336,6 +335,7 @@ private async processEmailWithTransaction(
         await this.saveEmailSyncState({
           uidValidity: inboxInfo.uidValidity,
           lastProcessedUid: inboxInfo.lastUid,
+          failedUids: [],
         });
 
         console.log(
@@ -361,43 +361,52 @@ private async processEmailWithTransaction(
         state.lastProcessedUid,
       );
 
-      if (newUids.length === 0) {
+      // Retry failed messages even after the cursor has advanced or the app restarts.
+      const pendingUids = new Set(state.failedUids);
+      const uids = [...new Set([...state.failedUids, ...newUids])]
+        .sort((a, b) => a - b);
+
+      if (uids.length === 0) {
         console.log('[EMAIL AUTO CHECK] Không có email mới.');
         return;
       }
 
       console.log(
-        `[EMAIL AUTO CHECK] Phát hiện ${newUids.length} email mới.`,
+        `[EMAIL AUTO CHECK] Xử lý ${uids.length} email mới hoặc cần thử lại.`,
       );
 
-      // Xử lý lần lượt từng email
-     
-      // Xử lý lần lượt từng email
-      for (const uid of newUids) {
-        const email = await this.normalizeEmail(uid);
+      for (const uid of uids) {
+        try {
+          const email = await this.normalizeEmail(uid);
 
-        console.log('[EMAIL NORMALIZED]', {
-          imapUid: email.imapUid,
-          messageIdPresent: email.messageId !== null,
-          subjectPresent: email.subject.length > 0,
-          fromEmailPresent: email.fromEmail.length > 0,
-          contentLength: email.content.length,
-          receivedAt: email.receivedAt,
-          channel: email.channel,
-        });
+          console.log('[EMAIL NORMALIZED]', {
+            imapUid: email.imapUid,
+            messageIdPresent: email.messageId !== null,
+            subjectPresent: email.subject.length > 0,
+            fromEmailPresent: email.fromEmail.length > 0,
+            contentLength: email.content.length,
+            receivedAt: email.receivedAt,
+            channel: email.channel,
+          });
 
-        // Tạo Ticket từ email đã chuẩn hóa
-        // Tạo Ticket và ghi nhận email trong cùng transaction
-       await this.processEmailWithTransaction(
-        email,
-        state.uidValidity,
-       );
+          await this.processEmailWithTransaction(email, state.uidValidity);
+          pendingUids.delete(uid);
+        } catch (error) {
+          pendingUids.add(uid);
+          console.error(
+            `[EMAIL AUTO CHECK] UID ${uid} thất bại; sẽ thử lại ở lượt sau:`,
+            error instanceof Error ? error.message : 'Lỗi không xác định',
+          );
+        }
 
-        // Chỉ lưu UID sau khi tạo Ticket thành công
+        // Persist the cursor and retry list together. A disk failure aborts this
+        // poll; the DB's unique key makes replaying a committed ticket safe.
         await this.saveEmailSyncState({
           uidValidity: state.uidValidity,
-          lastProcessedUid: uid,
+          lastProcessedUid: Math.max(state.lastProcessedUid, uid),
+          failedUids: [...pendingUids].sort((a, b) => a - b),
         });
+        state.lastProcessedUid = Math.max(state.lastProcessedUid, uid);
       }
 
     } catch (error) {
@@ -536,6 +545,8 @@ private async processEmailWithTransaction(
       }
 
       const { uidValidity, lastProcessedUid } = state;
+      // Older state files do not have a retry list.
+      const failedUids = 'failedUids' in state ? state.failedUids : [];
 
       if (
         !(
@@ -554,9 +565,19 @@ private async processEmailWithTransaction(
         throw new Error('Dữ liệu trạng thái email không hợp lệ');
       }
 
+      if (
+        !Array.isArray(failedUids) ||
+        !failedUids.every((uid: unknown) =>
+          typeof uid === 'number' && Number.isSafeInteger(uid) && uid > 0,
+        )
+      ) {
+        throw new Error('Danh sách UID cần thử lại không hợp lệ');
+      }
+
       return {
         uidValidity,
         lastProcessedUid,
+        failedUids: [...new Set<number>(failedUids)],
       };
     } catch (error: unknown) {
       const isEnoent =
@@ -568,6 +589,7 @@ private async processEmailWithTransaction(
         const defaultState: EmailSyncState = {
           uidValidity: null,
           lastProcessedUid: null,
+          failedUids: [],
         };
 
         // Tự động tạo thư mục data và file trạng thái ban đầu khi project mới clone
@@ -664,6 +686,13 @@ private async processEmailWithTransaction(
     }
   }
 
+  private getImapSecure(port: number): boolean {
+    const configured = this.configService.get<string>('EMAIL_IMAP_SECURE');
+    return configured === undefined || configured === ''
+      ? port === 993
+      : configured === 'true';
+  }
+
   // Hàm hỗ trợ: Tạo kết nối IMAP
   private createImapClient(): ImapFlow {
     const host =
@@ -673,8 +702,7 @@ private async processEmailWithTransaction(
       this.configService.getOrThrow<string>('EMAIL_IMAP_PORT'),
     );
 
-    const secure =
-      this.configService.get<string>('EMAIL_IMAP_SECURE') === 'true';
+    const secure = this.getImapSecure(port);
 
     const user =
       this.configService.getOrThrow<string>('EMAIL_USER');
